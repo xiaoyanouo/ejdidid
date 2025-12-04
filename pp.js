@@ -7759,34 +7759,7 @@ ${rd.description ? `关系描述：${rd.description}` : ""}
   setInterval(() => PerformanceUtils.cleanExpiredCache(), 60000); // 每分钟清理一次
   // === 核心业务逻辑函数 ===
   // 页面切换函数
-  // 切换X社交页面的函数 - 优化后
-  function switchXPage(pageType) {
-    // 🔒 社交功能权限验证：通知和私信页面需要验证
-    if (pageType === "notifications" || pageType === "messages") {
-      if (
-        typeof window.xSocialAuth !== "undefined" &&
-        !window.xSocialAuth.hasAccess()
-      ) {
-        console.log(`🔒 访问 ${pageType} 页面需要社交功能权限`);
-        window.xSocialAuth.requestAccess();
-        return; // 阻止页面切换
-      }
 
-      // 🔍 实时验证 Token 是否仍然有效（防止密钥被删除或拉黑）
-      if (
-        typeof window.xSocialAuth !== "undefined" &&
-        window.xSocialAuth.validateToken
-      ) {
-        window.xSocialAuth.validateToken().catch((error) => {
-          console.error("社交功能 Token 验证失败:", error);
-          // Token 验证失败会自动清除本地 token 并显示提示
-          // 刷新页面以重新检查权限
-          setTimeout(() => {
-            window.location.reload();
-          }, 1500);
-        });
-      }
-    }
 
     // 如果切换到主页、消息、通知、设置等主要页面，清除搜索结果标记
     const mainPages = [
@@ -58648,15 +58621,7 @@ ${
   // ==========================================
 
   // 打开地图约会页面
-  function openMapPage() {
-    // 🔒 地图约会功能权限验证：需要社交密钥
-    if (typeof window.xSocialAuth !== 'undefined' && !window.xSocialAuth.hasAccess()) {
-      console.log(`🔒 访问地图约会功能需要社交功能权限`);
-      window.xSocialAuth.requestAccess();
-      return; // 阻止打开地图
-    }
-    // 注入样式
-    injectMapStyles();
+
 
     // 获取容器，如果有通用容器就用，否则创建一个
     let container = document.getElementById('x-map-container');
