@@ -7757,36 +7757,6 @@ ${rd.description ? `关系描述：${rd.description}` : ""}
     },
   }; // 定期清理缓存
   setInterval(() => PerformanceUtils.cleanExpiredCache(), 60000); // 每分钟清理一次
-  // === 核心业务逻辑函数 ===
-  // 页面切换函数
-  // 切换X社交页面的函数 - 优化后
-  function switchXPage(pageType) {
-    // 🔒 社交功能权限验证：通知和私信页面需要验证
-    if (pageType === "notifications" || pageType === "messages") {
-      if (
-        typeof window.xSocialAuth !== "undefined" &&
-        !window.xSocialAuth.hasAccess()
-      ) {
-        console.log(`🔒 访问 ${pageType} 页面需要社交功能权限`);
-        window.xSocialAuth.requestAccess();
-        return; // 阻止页面切换
-      }
-
-      // 🔍 实时验证 Token 是否仍然有效（防止密钥被删除或拉黑）
-      if (
-        typeof window.xSocialAuth !== "undefined" &&
-        window.xSocialAuth.validateToken
-      ) {
-        window.xSocialAuth.validateToken().catch((error) => {
-          console.error("社交功能 Token 验证失败:", error);
-          // Token 验证失败会自动清除本地 token 并显示提示
-          // 刷新页面以重新检查权限
-          setTimeout(() => {
-            window.location.reload();
-          }, 1500);
-        });
-      }
-    }
 
     // 如果切换到主页、消息、通知、设置等主要页面，清除搜索结果标记
     const mainPages = [
@@ -31466,13 +31436,16 @@ ${index + 1}. ${comment.user.name} (${comment.user.handle}): ${
   }
 
   // ========== 核心功能 ==========
+  // 全局开关：true=启用验证，false=跳过验证（自己使用时设为false）
+const SKIP_AUTH = false;
 
   /**
    * 检查是否有有效的访问权限（直播功能）
    */
   function checkLiveAccess() {
-    const token = localStorage.getItem(CONFIG.STORAGE_KEY);
-    if (!token) return false;
+  if (SKIP_AUTH) return true; // 跳过验证，直接返回有权限
+  const token = localStorage.getItem(CONFIG.STORAGE_KEY);
+  if (!token) return false;
 
     try {
       const data = JSON.parse(safeBase64Decode(token));
@@ -31490,60 +31463,12 @@ ${index + 1}. ${comment.user.name} (${comment.user.handle}): ${
   }
 
   /**
-   * 实时验证 Token 是否仍然有效（防止密钥被删除或拉黑）
-   * 在关键操作时调用，确保用户权限未被撤销
-   */
-  async function validateLiveTokenWithServer() {
-    const token = localStorage.getItem(CONFIG.STORAGE_KEY);
-    if (!token) return false;
-
-    try {
-      const data = JSON.parse(safeBase64Decode(token));
-      const deviceId = getDeviceId();
-
-      const response = await fetch(CONFIG.WORKER_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: data.key,
-          deviceId,
-          action: "validateToken", // 标记为 token 验证请求
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return false;
-
-      const result = await response.json();
-
-      if (!result.valid) {
-        // Token 已失效（密钥被删除或拉黑）
-        console.warn("⚠️ Token 已失效:", result.error);
-        localStorage.removeItem(CONFIG.STORAGE_KEY);
-
-        if (result.blacklisted) {
-          alert("❌ 您的访问权限已被撤销");
-        } else if (result.tokenInvalidated) {
-          alert("⚠️ 密钥已过期，请重新验证");
-        }
-
-        return false;
-      }
-
-      return true;
-    } catch (error) {
-      console.error("Token 验证失败:", error);
-      // 网络错误不清除 token，允许离线使用
-      return true;
-    }
-  }
-
-  /**
    * 检查是否有社交功能访问权限（通知+私信）
    */
   function checkSocialAccess() {
-    const token = localStorage.getItem(CONFIG.SOCIAL_STORAGE_KEY);
-    if (!token) return false;
+  if (SKIP_AUTH) return true; // 跳过验证
+  const token = localStorage.getItem(CONFIG.SOCIAL_STORAGE_KEY);
+  if (!token) return false;
 
     try {
       const data = JSON.parse(safeBase64Decode(token));
@@ -31561,58 +31486,12 @@ ${index + 1}. ${comment.user.name} (${comment.user.handle}): ${
   }
 
   /**
-   * 实时验证社交 Token 是否仍然有效
-   */
-  async function validateSocialTokenWithServer() {
-    const token = localStorage.getItem(CONFIG.SOCIAL_STORAGE_KEY);
-    if (!token) return false;
-
-    try {
-      const data = JSON.parse(safeBase64Decode(token));
-      const deviceId = getDeviceId();
-
-      const response = await fetch(CONFIG.WORKER_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: data.key,
-          deviceId,
-          featureType: "social",
-          action: "validateToken",
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return false;
-
-      const result = await response.json();
-
-      if (!result.valid) {
-        console.warn("⚠️ 社交功能 Token 已失效:", result.error);
-        localStorage.removeItem(CONFIG.SOCIAL_STORAGE_KEY);
-
-        if (result.blacklisted) {
-          alert("❌ 您的社交功能访问权限已被撤销");
-        } else if (result.tokenInvalidated) {
-          alert("⚠️ 社交功能密钥已过期，请重新验证");
-        }
-
-        return false;
-      }
-
-      return true;
-    } catch (error) {
-      console.error("社交功能 Token 验证失败:", error);
-      return true;
-    }
-  }
-
-  /**
    * 检查是否有地图功能访问权限
    */
   function checkMapAccess() {
-    const token = localStorage.getItem(CONFIG.MAP_STORAGE_KEY);
-    if (!token) return false;
+  if (SKIP_AUTH) return true; // 跳过验证
+  const token = localStorage.getItem(CONFIG.MAP_STORAGE_KEY);
+  if (!token) return false;
 
     try {
       const data = JSON.parse(safeBase64Decode(token));
@@ -31626,53 +31505,6 @@ ${index + 1}. ${comment.user.name} (${comment.user.handle}): ${
       console.warn("地图功能Token验证失败:", error);
       localStorage.removeItem(CONFIG.MAP_STORAGE_KEY);
       return false;
-    }
-  }
-
-  /**
-   * 实时验证地图 Token 是否仍然有效
-   */
-  async function validateMapTokenWithServer() {
-    const token = localStorage.getItem(CONFIG.MAP_STORAGE_KEY);
-    if (!token) return false;
-
-    try {
-      const data = JSON.parse(safeBase64Decode(token));
-      const deviceId = getDeviceId();
-
-      const response = await fetch(CONFIG.WORKER_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: data.key,
-          deviceId,
-          featureType: "map",
-          action: "validateToken",
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return false;
-
-      const result = await response.json();
-
-      if (!result.valid) {
-        console.warn("⚠️ 地图功能 Token 已失效:", result.error);
-        localStorage.removeItem(CONFIG.MAP_STORAGE_KEY);
-
-        if (result.blacklisted) {
-          alert("❌ 您的地图功能访问权限已被撤销");
-        } else if (result.tokenInvalidated) {
-          alert("⚠️ 地图功能密钥已过期，请重新验证");
-        }
-
-        return false;
-      }
-
-      return true;
-    } catch (error) {
-      console.error("地图功能 Token 验证失败:", error);
-      return true;
     }
   }
 
