@@ -7761,6 +7761,32 @@ ${rd.description ? `关系描述：${rd.description}` : ""}
   // 页面切换函数
   // 切换X社交页面的函数 - 优化后
   function switchXPage(pageType) {
+    // 🔒 社交功能权限验证：通知和私信页面需要验证
+    if (pageType === "notifications" || pageType === "messages") {
+      if (
+        typeof window.xSocialAuth !== "undefined" &&
+        !window.xSocialAuth.hasAccess()
+      ) {
+        console.log(`🔒 访问 ${pageType} 页面需要社交功能权限`);
+        window.xSocialAuth.requestAccess();
+        return; // 阻止页面切换
+      }
+
+      // 🔍 实时验证 Token 是否仍然有效（防止密钥被删除或拉黑）
+      if (
+        typeof window.xSocialAuth !== "undefined" &&
+        window.xSocialAuth.validateToken
+      ) {
+        window.xSocialAuth.validateToken().catch((error) => {
+          console.error("社交功能 Token 验证失败:", error);
+          // Token 验证失败会自动清除本地 token 并显示提示
+          // 刷新页面以重新检查权限
+          setTimeout(() => {
+            window.location.reload();
+          }, 1500);
+        });
+      }
+    }
 
     // 如果切换到主页、消息、通知、设置等主要页面，清除搜索结果标记
     const mainPages = [
@@ -16805,6 +16831,24 @@ ${
     showXToast("通知设置已更新", "success");
   }; // 发送私信
   window.sendMessageToAccount = async function () {
+    // 🔒 社交功能权限验证：发送私信需要验证
+    if (
+      typeof window.xSocialAuth !== "undefined" &&
+      !window.xSocialAuth.hasAccess()
+    ) {
+      console.log("🔒 发送私信需要社交功能权限");
+      window.xSocialAuth.requestAccess();
+      return; // 阻止操作
+    }
+
+    if (!currentViewingAccount) {
+      showXToast("无法获取账户信息", "error");
+      return;
+    }
+    console.log("📨 从账户主页打开私信详情页"); // 获取账户信息
+    const accountInfo =
+      currentViewingAccount.accountInfo || currentViewingAccount;
+    const cleanHandle = accountInfo.handle.replace("@", "");
 
     // 🔧 检查该账户是否对应某个已绑定角色
     try {
@@ -31445,7 +31489,823 @@ ${index + 1}. ${comment.user.name} (${comment.user.handle}): ${
     }
   }
 
- 
+  /**
+   * 实时验证 Token 是否仍然有效（防止密钥被删除或拉黑）
+   * 在关键操作时调用，确保用户权限未被撤销
+   */
+  async function validateLiveTokenWithServer() {
+    const token = localStorage.getItem(CONFIG.STORAGE_KEY);
+    if (!token) return false;
+
+    try {
+      const data = JSON.parse(safeBase64Decode(token));
+      const deviceId = getDeviceId();
+
+      const response = await fetch(CONFIG.WORKER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: data.key,
+          deviceId,
+          action: "validateToken", // 标记为 token 验证请求
+        }),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!response.ok) return false;
+
+      const result = await response.json();
+
+      if (!result.valid) {
+        // Token 已失效（密钥被删除或拉黑）
+        console.warn("⚠️ Token 已失效:", result.error);
+        localStorage.removeItem(CONFIG.STORAGE_KEY);
+
+        if (result.blacklisted) {
+          alert("❌ 您的访问权限已被撤销");
+        } else if (result.tokenInvalidated) {
+          alert("⚠️ 密钥已过期，请重新验证");
+        }
+
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Token 验证失败:", error);
+      // 网络错误不清除 token，允许离线使用
+      return true;
+    }
+  }
+
+  /**
+   * 检查是否有社交功能访问权限（通知+私信）
+   */
+  function checkSocialAccess() {
+    const token = localStorage.getItem(CONFIG.SOCIAL_STORAGE_KEY);
+    if (!token) return false;
+
+    try {
+      const data = JSON.parse(safeBase64Decode(token));
+      // 检查token是否过期
+      if (Date.now() > data.exp) {
+        localStorage.removeItem(CONFIG.SOCIAL_STORAGE_KEY);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.warn("社交功能Token验证失败:", error);
+      localStorage.removeItem(CONFIG.SOCIAL_STORAGE_KEY);
+      return false;
+    }
+  }
+
+  /**
+   * 实时验证社交 Token 是否仍然有效
+   */
+  async function validateSocialTokenWithServer() {
+    const token = localStorage.getItem(CONFIG.SOCIAL_STORAGE_KEY);
+    if (!token) return false;
+
+    try {
+      const data = JSON.parse(safeBase64Decode(token));
+      const deviceId = getDeviceId();
+
+      const response = await fetch(CONFIG.WORKER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: data.key,
+          deviceId,
+          featureType: "social",
+          action: "validateToken",
+        }),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!response.ok) return false;
+
+      const result = await response.json();
+
+      if (!result.valid) {
+        console.warn("⚠️ 社交功能 Token 已失效:", result.error);
+        localStorage.removeItem(CONFIG.SOCIAL_STORAGE_KEY);
+
+        if (result.blacklisted) {
+          alert("❌ 您的社交功能访问权限已被撤销");
+        } else if (result.tokenInvalidated) {
+          alert("⚠️ 社交功能密钥已过期，请重新验证");
+        }
+
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("社交功能 Token 验证失败:", error);
+      return true;
+    }
+  }
+
+  /**
+   * 检查是否有地图功能访问权限
+   */
+  function checkMapAccess() {
+    const token = localStorage.getItem(CONFIG.MAP_STORAGE_KEY);
+    if (!token) return false;
+
+    try {
+      const data = JSON.parse(safeBase64Decode(token));
+      // 检查token是否过期
+      if (Date.now() > data.exp) {
+        localStorage.removeItem(CONFIG.MAP_STORAGE_KEY);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.warn("地图功能Token验证失败:", error);
+      localStorage.removeItem(CONFIG.MAP_STORAGE_KEY);
+      return false;
+    }
+  }
+
+  /**
+   * 实时验证地图 Token 是否仍然有效
+   */
+  async function validateMapTokenWithServer() {
+    const token = localStorage.getItem(CONFIG.MAP_STORAGE_KEY);
+    if (!token) return false;
+
+    try {
+      const data = JSON.parse(safeBase64Decode(token));
+      const deviceId = getDeviceId();
+
+      const response = await fetch(CONFIG.WORKER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: data.key,
+          deviceId,
+          featureType: "map",
+          action: "validateToken",
+        }),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!response.ok) return false;
+
+      const result = await response.json();
+
+      if (!result.valid) {
+        console.warn("⚠️ 地图功能 Token 已失效:", result.error);
+        localStorage.removeItem(CONFIG.MAP_STORAGE_KEY);
+
+        if (result.blacklisted) {
+          alert("❌ 您的地图功能访问权限已被撤销");
+        } else if (result.tokenInvalidated) {
+          alert("⚠️ 地图功能密钥已过期，请重新验证");
+        }
+
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("地图功能 Token 验证失败:", error);
+      return true;
+    }
+  }
+
+  /**
+   * 显示密钥输入弹窗（直播功能）
+   */
+  function requestLiveAccess() {
+    // 避免重复弹窗
+    if (document.getElementById("live-auth-modal")) return;
+
+    const modal = document.createElement("div");
+    modal.id = "live-auth-modal";
+    modal.className = "live-auth-container";
+    modal.innerHTML = `
+      <div class="auth-overlay"></div>
+      <div class="auth-cassette-box">
+        <!-- 磁带纹理 -->
+        <div class="cassette-texture"></div>
+        
+        <!-- 头部：唱片图标 + 标题 -->
+        <div class="auth-header">
+          <div class="vinyl-lock-icon">
+            <svg class="vinyl-disc-svg" viewBox="0 0 100 100">
+              <circle cx="50" cy="50" r="45" fill="url(#vinylGradient)"/>
+              <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/>
+              <circle cx="50" cy="50" r="30" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/>
+              <circle cx="50" cy="50" r="20" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/>
+              <circle cx="50" cy="50" r="8" fill="#0a0a0a"/>
+              <defs>
+                <radialGradient id="vinylGradient">
+                  <stop offset="0%" style="stop-color:#2a2a2a"/>
+                  <stop offset="50%" style="stop-color:#1a1a1a"/>
+                  <stop offset="100%" style="stop-color:#0a0a0a"/>
+                </radialGradient>
+              </defs>
+            </svg>
+            <div class="lock-overlay">
+              <svg viewBox="0 0 24 24" width="24" height="24" stroke="#fff" fill="none" stroke-width="2">
+                <rect x="5" y="11" width="14" height="10" rx="2"/>
+                <path d="M12 15v2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+          </div>
+          
+          <div class="auth-title-section">
+            <h3 class="auth-title">ACCESS REQUIRED</h3>
+            <p class="auth-subtitle">请输入管理员提供的通行密钥</p>
+            <p class="auth-hint">验证成功后7天内有效</p>
+          </div>
+        </div>
+        
+        <!-- 刷新提示 -->
+        <div class="auth-warning-box">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+          </svg>
+          <span>验证成功后将自动刷新页面，请确保已保存数据</span>
+        </div>
+        
+        <!-- 输入区域 -->
+        <div class="auth-input-section">
+          <div class="input-label">
+            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2">
+              <rect x="5" y="11" width="14" height="10" rx="2"/>
+              <path d="M12 15v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+            <span>PASS KEY</span>
+          </div>
+          <div class="input-wrapper">
+            <input 
+              id="live-key-input" 
+              type="password" 
+              placeholder="••••••••••••" 
+              class="auth-input"
+              onkeypress="if(event.key==='Enter')document.getElementById('verify-live-key').click()"
+            />
+            <div class="input-underline"></div>
+          </div>
+        </div>
+        
+        <!-- 按钮组 -->
+        <div class="auth-buttons">
+          <button class="auth-btn auth-btn-cancel" onclick="document.getElementById('live-auth-modal').remove()">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5">
+              <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+            <span>CANCEL</span>
+          </button>
+          <button id="verify-live-key" class="auth-btn auth-btn-verify">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12"/>
+          </svg>
+            <span>VERIFY</span>
+          </button>
+        </div>
+        
+        <!-- 状态提示 -->
+        <div id="verify-status" class="auth-status"></div>
+      </div>
+      
+      <style>
+        .live-auth-container {
+        position: fixed;
+        inset: 0;
+          z-index: 99999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+          opacity: 0;
+          animation: authFadeIn 0.4s ease forwards;
+        }
+        
+        @keyframes authFadeIn {
+          to { opacity: 1; }
+        }
+        
+        .auth-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.85);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+        }
+        
+        .auth-cassette-box {
+        position: relative;
+          width: 90%;
+          max-width: 340px;
+        background: linear-gradient(
+          135deg,
+            rgba(25, 25, 25, 0.98) 0%,
+            rgba(20, 20, 20, 0.98) 50%,
+            rgba(15, 15, 15, 0.98) 100%
+        );
+        backdrop-filter: blur(40px) saturate(150%);
+          -webkit-backdrop-filter: blur(40px) saturate(150%);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+          border-radius: 20px;
+          box-shadow: 
+            0 20px 60px rgba(0, 0, 0, 0.6),
+            0 0 1px rgba(255, 255, 255, 0.2),
+            inset 0 1px 1px rgba(255, 255, 255, 0.1);
+          overflow: hidden;
+          padding: 24px 20px;
+          transform: translateY(40px) scale(0.9);
+          opacity: 0;
+          animation: authSlideUp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s forwards;
+          z-index: 1;
+        }
+        
+        @keyframes authSlideUp {
+          to { 
+          transform: translateY(0) scale(1);
+            opacity: 1;
+        }
+      }
+
+        .cassette-texture {
+        position: absolute;
+        inset: 0;
+        background: repeating-linear-gradient(
+          90deg,
+          transparent,
+            transparent 2px,
+            rgba(255, 255, 255, 0.01) 2px,
+            rgba(255, 255, 255, 0.01) 4px
+        );
+        pointer-events: none;
+      }
+
+        .auth-header {
+        display: flex;
+          flex-direction: column;
+        align-items: center;
+          margin-bottom: 22px;
+        position: relative;
+      }
+
+        .vinyl-lock-icon {
+          width: 64px;
+          height: 64px;
+        position: relative;
+          margin-bottom: 12px;
+          animation: vinylSpin 8s linear infinite;
+        }
+        
+        @keyframes vinylSpin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        
+        .vinyl-disc-svg {
+        width: 100%;
+        height: 100%;
+          filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.6));
+        }
+        
+        .lock-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+          animation: lockPulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes lockPulse {
+          0%, 100% { opacity: 0.9; transform: scale(1); }
+          50% { opacity: 1; transform: scale(1.05); }
+        }
+        
+        .auth-title-section {
+        text-align: center;
+        }
+        
+        .auth-title {
+          margin: 0 0 6px 0;
+        font-size: 13px;
+        font-weight: 800;
+          letter-spacing: 2.5px;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+        color: rgba(255, 255, 255, 0.95);
+          text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+      }
+
+        .auth-subtitle {
+          margin: 0 0 3px 0;
+        font-size: 12px;
+          color: rgba(255, 255, 255, 0.7);
+          line-height: 1.4;
+        }
+        
+        .auth-hint {
+          margin: 0;
+        font-size: 10px;
+          color: rgba(255, 255, 255, 0.45);
+        font-family: "Courier New", monospace;
+        }
+        
+        .auth-input-section {
+          margin-bottom: 20px;
+        }
+        
+        .input-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 8px;
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+          color: rgba(255, 255, 255, 0.6);
+        }
+        
+        .input-wrapper {
+        position: relative;
+      }
+
+        .auth-input {
+          width: 100%;
+          padding: 12px 14px;
+          background: rgba(10, 10, 10, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 10px;
+          color: #fff;
+          font-size: 14px;
+          font-family: "Courier New", monospace;
+          letter-spacing: 1.5px;
+          box-sizing: border-box;
+          outline: none;
+          transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .auth-input:focus {
+          border-color: rgba(255, 255, 255, 0.3);
+          background: rgba(15, 15, 15, 0.8);
+          box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+        }
+        
+        .auth-input::placeholder {
+          color: rgba(255, 255, 255, 0.3);
+          letter-spacing: 4px;
+        }
+        
+        .input-underline {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+          height: 2px;
+          background: linear-gradient(90deg, 
+          transparent,
+            rgba(255, 255, 255, 0.3),
+          transparent
+        );
+          transform: scaleX(0);
+          transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        pointer-events: none;
+      }
+
+        .auth-input:focus + .input-underline {
+          transform: scaleX(1);
+        }
+        
+        .auth-buttons {
+        display: flex;
+          gap: 10px;
+          margin-bottom: 14px;
+        }
+        
+        .auth-btn {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+          gap: 6px;
+          padding: 12px 16px;
+          border-radius: 10px;
+        font-size: 11px;
+        font-weight: 800;
+          letter-spacing: 1.2px;
+        font-family: "Courier New", monospace;
+        cursor: pointer;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+          border: none;
+          outline: none;
+        }
+        
+        .auth-btn-cancel {
+          background: rgba(255, 255, 255, 0.06);
+          color: rgba(255, 255, 255, 0.8);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        
+        .auth-btn-cancel:hover {
+          background: rgba(255, 255, 255, 0.1);
+          transform: translateY(-2px);
+        }
+        
+        .auth-btn-cancel:active {
+          transform: scale(0.95);
+        }
+        
+        .auth-btn-verify {
+          flex: 1.5;
+          background: linear-gradient(135deg, 
+          rgba(255, 255, 255, 0.15),
+          rgba(255, 255, 255, 0.08)
+        );
+          color: #fff;
+          border: 1px solid rgba(255, 255, 255, 0.2);
+          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+        }
+        
+        .auth-btn-verify:hover {
+          background: linear-gradient(135deg, 
+          rgba(255, 255, 255, 0.22),
+          rgba(255, 255, 255, 0.12)
+        );
+          transform: translateY(-2px);
+          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+        }
+        
+        .auth-btn-verify:active {
+          transform: scale(0.95);
+        }
+        
+        .auth-btn:disabled {
+          opacity: 0.5;
+        cursor: not-allowed;
+          transform: none !important;
+        }
+        
+        .auth-status {
+          min-height: 20px;
+        text-align: center;
+        font-size: 11px;
+          font-weight: 600;
+          padding: 6px 10px;
+          border-radius: 6px;
+          background: rgba(255, 255, 255, 0.03);
+          border: 1px solid transparent;
+          transition: all 0.3s ease;
+        }
+        
+        .auth-status:empty {
+          opacity: 0;
+        }
+        
+        .auth-status.warning {
+          color: #f59e0b;
+          border-color: rgba(245, 158, 11, 0.2);
+          background: rgba(245, 158, 11, 0.05);
+        }
+        
+        .auth-status.loading {
+        color: rgba(255, 255, 255, 0.8);
+        border-color: rgba(255, 255, 255, 0.15);
+          background: rgba(255, 255, 255, 0.05);
+        }
+        
+        .auth-status.success {
+          color: #00ba7c;
+          border-color: rgba(0, 186, 124, 0.2);
+          background: rgba(0, 186, 124, 0.05);
+        }
+        
+        .auth-status.error {
+          color: #f91880;
+          border-color: rgba(249, 24, 128, 0.2);
+          background: rgba(249, 24, 128, 0.05);
+        }
+        
+        .auth-warning-box {
+        display: flex;
+        align-items: center;
+          gap: 6px;
+          margin-top: 10px;
+        font-size: 10px;
+          color: rgba(255, 255, 255, 0.6);
+        font-family: "Courier New", monospace;
+        }
+
+        .auth-warning-box svg {
+          width: 14px;
+          height: 14px;
+          animation: warningPulse 2s ease-in-out infinite;
+        }
+
+        @keyframes warningPulse {
+          0%, 100% { opacity: 0.9; transform: scale(1); }
+          50% { opacity: 1; transform: scale(1.05); }
+        }
+        
+        @media (max-width: 480px) {
+          .auth-cassette-box {
+            padding: 20px 18px;
+            max-width: 320px;
+          }
+          
+          .vinyl-lock-icon {
+            width: 56px;
+            height: 56px;
+          }
+          
+          .lock-overlay svg {
+            width: 20px;
+            height: 20px;
+          }
+          
+          .auth-header {
+            margin-bottom: 18px;
+          }
+          
+          .auth-title {
+          font-size: 12px;
+            letter-spacing: 2px;
+          }
+          
+          .auth-subtitle {
+          font-size: 11px;
+        }
+
+          .auth-hint {
+          font-size: 9px;
+          }
+          
+          .auth-input {
+          padding: 10px 12px;
+            font-size: 13px;
+          }
+          
+          .auth-btn {
+            padding: 10px 14px;
+            font-size: 10px;
+            gap: 5px;
+          }
+          
+          .auth-btn svg {
+        width: 14px;
+        height: 14px;
+          }
+          
+          .auth-status {
+        font-size: 10px;
+            padding: 5px 8px;
+          }
+        }
+      </style>
+    `;
+
+    document.body.appendChild(modal);
+
+    // 自动聚焦输入框
+    setTimeout(() => {
+      const input = document.getElementById("live-key-input");
+      if (input) input.focus();
+    }, 600);
+
+    // 绑定验证按钮事件
+    setupVerificationButton();
+  }
+
+  /**
+   * 设置验证按钮功能
+   */
+  function setupVerificationButton() {
+    const btn = document.getElementById("verify-live-key");
+    if (!btn) return;
+
+    btn.onclick = async () => {
+      const input = document.getElementById("live-key-input");
+      const status = document.getElementById("verify-status");
+      const key = input.value.trim();
+
+      // 验证输入
+      if (!key) {
+        showStatus(status, "请输入通行密钥", "warning");
+        input.focus();
+        return;
+      }
+
+      // 显示加载状态
+      btn.innerHTML = `
+        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5" style="animation: spin 1s linear infinite;">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M12 2 A10 10 0 0 1 22 12"/>
+        </svg>
+        <span>VERIFYING...</span>
+        <style>
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+        </style>
+      `;
+      btn.disabled = true;
+      showStatus(status, "正在验证密钥，请稍候...", "loading");
+
+      try {
+        // 调用验证API
+        const deviceId = getDeviceId();
+        const response = await fetch(CONFIG.WORKER_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key, deviceId }),
+          signal: AbortSignal.timeout(10000), // 10秒超时
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        if (result.valid) {
+          // 验证成功，生成token
+          const token = safeBase64Encode(
+            JSON.stringify({
+              exp: Date.now() + CONFIG.TOKEN_EXPIRY,
+              user: result.user || "用户",
+              timestamp: Date.now(),
+              key: key, // 保存原始 key，用于自动加载
+            })
+          );
+
+          localStorage.setItem(CONFIG.STORAGE_KEY, token);
+
+          // ✨ 如果响应中包含 live 代码，执行它
+          if (result.code) {
+            try {
+              console.log("🔓 正在加载 live 功能代码...");
+              // 使用直接 eval 在当前作用域执行代码
+              // 合并后，x-live.js 和 x-core.js 在同一个大 IIFE 中，可以互相访问
+              eval(result.code);
+
+              // 标记代码已加载
+              window._xLiveCodeLoaded = true;
+
+              // ✨ 重新导出所有被覆盖的局部变量到 window
+              window.switchLiveTab = switchLiveTab;
+              window.joinLiveStream = joinLiveStream;
+              window.initLivePage = initLivePage;
+              window.renderLiveStreams = renderLiveStreams;
+              window.openLiveCategoryModal = openLiveCategoryModal;
+              window.closeLiveCategoryModal = closeLiveCategoryModal;
+              window.addNewLiveCategory = addNewLiveCategory;
+              window.deleteLiveCategory = deleteLiveCategory;
+              window.toggleLiveCategory = toggleLiveCategory;
+              window.updateLiveCategoryName = updateLiveCategoryName;
+              window.updateLiveCategoryDescription =
+                updateLiveCategoryDescription;
+              window.saveLiveCustomCategories = saveLiveCustomCategories;
+              window.syncLivePageAvatar = syncLivePageAvatar;
+              window.toggleLiveActionButtons = toggleLiveActionButtons;
+              window.refreshLiveStreams = refreshLiveStreams;
+              window.startLiveStream = startLiveStream;
+              window.syncLiveCharacterAvatars = syncLiveCharacterAvatars;
+              window.handleLiveCharacterClick = handleLiveCharacterClick;
+              window.loadSavedLiveData = loadSavedLiveData;
+              window.loadLiveCharacterStatus = loadLiveCharacterStatus;
+              window.saveLiveCharacterStatus = saveLiveCharacterStatus;
+              window.handleLiveMainBtnMouseOver = handleLiveMainBtnMouseOver;
+              window.handleLiveMainBtnMouseOut = handleLiveMainBtnMouseOut;
+              window.handleLiveMainBtnTouchStart = handleLiveMainBtnTouchStart;
+              window.handleLiveMainBtnTouchEnd = handleLiveMainBtnTouchEnd;
+              window.handleLiveSubBtnMouseOver = handleLiveSubBtnMouseOver;
+              window.handleLiveSubBtnMouseOut = handleLiveSubBtnMouseOut;
+              window.handleLiveSubBtnTouchStart = handleLiveSubBtnTouchStart;
+              window.handleLiveSubBtnTouchEnd = handleLiveSubBtnTouchEnd;
+              window.closeLiveRoom = closeLiveRoom;
+              window.toggleLiveInfo = toggleLiveInfo;
+              window.sendDanmaku = sendDanmaku;
+              window.sendLike = sendLike;
+              window.showLiveRoomMenu = showLiveRoomMenu;
+
+              console.log("✅ live 功能已加载，所有函数已更新");
+            } catch (codeError) {
+              console.error("❌ live 代码执行失败:", codeError);
+              // 即使代码执行失败，验证仍然成功，只是功能可能不完整
+            }
+          }
+
+          showStatus(
+            status,
+            `验证成功！欢迎 ${result.user || "用户"}`,
+            "success"
+          );
 
           // 延迟关闭弹窗并刷新
           setTimeout(() => {
@@ -31466,7 +32326,28 @@ ${index + 1}. ${comment.user.name} (${comment.user.handle}): ${
               window.location.reload();
             }
           }, 1200);
-        } 
+        } else {
+          // ✅ 显示服务器返回的详细错误信息
+          const errorMsg = result.error || "密钥无效或已过期，请重试";
+          console.error("❌ 验证失败:", errorMsg, result);
+          showStatus(status, errorMsg, "error");
+          resetButton(btn);
+          input.focus();
+          input.select();
+        }
+      } catch (error) {
+        console.error("验证失败:", error);
+
+        let errorMsg = "验证失败，请重试";
+        if (error.name === "AbortError") {
+          errorMsg = "请求超时，请检查网络连接";
+        } else if (!navigator.onLine) {
+          errorMsg = "网络未连接，请检查后重试";
+        }
+
+        showStatus(status, errorMsg, "error");
+        resetButton(btn);
+      }
     };
   }
 
@@ -31498,7 +32379,585 @@ ${index + 1}. ${comment.user.name} (${comment.user.handle}): ${
     btn.disabled = false;
   }
 
+  /**
+   * 显示社交功能密钥输入弹窗（通知+私信）
+   */
+  function requestSocialAccess() {
+    // 避免重复弹窗
+    if (document.getElementById("social-auth-modal")) return;
 
+    const modal = document.createElement("div");
+    modal.id = "social-auth-modal";
+    modal.className = "live-auth-container"; // 复用直播功能的样式
+    modal.innerHTML = `
+      <div class="auth-overlay"></div>
+      <div class="auth-cassette-box">
+        <!-- 磁带纹理 -->
+        <div class="cassette-texture"></div>
+        
+        <!-- 头部：唱片图标 + 标题 -->
+        <div class="auth-header">
+          <div class="vinyl-lock-icon">
+            <svg class="vinyl-disc-svg" viewBox="0 0 100 100">
+              <circle cx="50" cy="50" r="45" fill="url(#vinylGradient)"/>
+              <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/>
+              <circle cx="50" cy="50" r="30" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/>
+              <circle cx="50" cy="50" r="20" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/>
+              <circle cx="50" cy="50" r="8" fill="#0a0a0a"/>
+              <defs>
+                <radialGradient id="vinylGradient">
+                  <stop offset="0%" style="stop-color:#2a2a2a"/>
+                  <stop offset="50%" style="stop-color:#1a1a1a"/>
+                  <stop offset="100%" style="stop-color:#0a0a0a"/>
+                </radialGradient>
+              </defs>
+            </svg>
+            <div class="lock-overlay">
+              <svg viewBox="0 0 24 24" width="24" height="24" stroke="#fff" fill="none" stroke-width="2">
+                <rect x="5" y="11" width="14" height="10" rx="2"/>
+                <path d="M12 15v2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+          </div>
+        </div>
+
+          <div class="auth-title-section">
+            <h3 class="auth-title">ACCESS REQUIRED</h3>
+            <p class="auth-subtitle">请输入管理员提供的社交功能密钥</p>
+            <p class="auth-hint">验证成功后7天内有效</p>
+          </div>
+        </div>
+
+        <!-- 刷新提示 -->
+        <div class="auth-warning-box">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+            </svg>
+          <span>验证成功后将自动刷新页面，请确保已保存数据</span>
+          </div>
+          
+        <!-- 输入区域 -->
+        <div class="auth-input-section">
+          <div class="input-label">
+            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2">
+              <rect x="5" y="11" width="14" height="10" rx="2"/>
+              <path d="M12 15v2"/>
+              <circle cx="12" cy="7" r="4"/>
+                </svg>
+            <span>PASS KEY</span>
+            </div>
+          <div class="input-wrapper">
+              <input 
+              id="social-key-input" 
+              type="password" 
+              placeholder="••••••••••••" 
+              class="auth-input"
+              onkeypress="if(event.key==='Enter')document.getElementById('verify-social-key').click()"
+            />
+            <div class="input-underline"></div>
+              </div>
+            </div>
+            
+        <!-- 按钮组 -->
+        <div class="auth-buttons">
+          <button class="auth-btn auth-btn-cancel" onclick="document.getElementById('social-auth-modal').remove()">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5">
+              <path d="M18 6L6 18M6 6l12 12"/>
+              </svg>
+            <span>CANCEL</span>
+            </button>
+          <button id="verify-social-key" class="auth-btn auth-btn-verify">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12"/>
+          </svg>
+            <span>VERIFY</span>
+          </button>
+        </div>
+
+        <!-- 状态提示 -->
+        <div id="social-verify-status" class="auth-status"></div>
+            </div>
+      
+      <style>
+        .live-auth-container {
+        position: fixed;
+        inset: 0;
+          z-index: 99999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+          opacity: 0;
+          animation: authFadeIn 0.4s ease forwards;
+        }
+        
+        @keyframes authFadeIn {
+          to { opacity: 1; }
+        }
+        
+        .auth-overlay {
+        position: fixed;
+        inset: 0;
+          background: rgba(0, 0, 0, 0.85);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+      }
+
+        .auth-cassette-box {
+        position: relative;
+        width: 90%;
+          max-width: 340px;
+        background: linear-gradient(
+          135deg,
+          rgba(25, 25, 25, 0.98) 0%,
+          rgba(20, 20, 20, 0.98) 50%,
+          rgba(15, 15, 15, 0.98) 100%
+        );
+        backdrop-filter: blur(40px) saturate(150%);
+          -webkit-backdrop-filter: blur(40px) saturate(150%);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+          border-radius: 20px;
+          box-shadow: 
+            0 20px 60px rgba(0, 0, 0, 0.6),
+                    0 0 1px rgba(255, 255, 255, 0.2),
+                    inset 0 1px 1px rgba(255, 255, 255, 0.1);
+        overflow: hidden;
+          padding: 24px 20px;
+          transform: translateY(40px) scale(0.9);
+        opacity: 0;
+          animation: authSlideUp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s forwards;
+          z-index: 1;
+        }
+        
+        @keyframes authSlideUp {
+          to { 
+          transform: translateY(0) scale(1);
+            opacity: 1;
+          }
+        }
+        
+        .cassette-texture {
+        position: absolute;
+        inset: 0;
+        background: repeating-linear-gradient(
+          90deg,
+          transparent,
+          transparent 2px,
+          rgba(255, 255, 255, 0.01) 2px,
+          rgba(255, 255, 255, 0.01) 4px
+        );
+        pointer-events: none;
+      }
+
+        .auth-header {
+        display: flex;
+          flex-direction: column;
+        align-items: center;
+          margin-bottom: 22px;
+        position: relative;
+      }
+
+        .vinyl-lock-icon {
+          width: 64px;
+          height: 64px;
+        position: relative;
+          margin-bottom: 12px;
+          animation: vinylSpin 8s linear infinite;
+        }
+        
+        @keyframes vinylSpin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        
+        .vinyl-disc-svg {
+          width: 100%;
+        height: 100%;
+          filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.6));
+        }
+        
+        .lock-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+          animation: lockPulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes lockPulse {
+          0%, 100% { opacity: 0.9; transform: scale(1); }
+          50% { opacity: 1; transform: scale(1.05); }
+        }
+        
+        .auth-title-section {
+        text-align: center;
+        }
+        
+        .auth-title {
+          margin: 0 0 6px 0;
+        font-size: 13px;
+        font-weight: 800;
+          letter-spacing: 2.5px;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+          color: rgba(255, 255, 255, 0.95);
+          text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+      }
+
+        .auth-subtitle {
+          margin: 0 0 3px 0;
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.7);
+          line-height: 1.4;
+        }
+        
+        .auth-hint {
+          margin: 0;
+        font-size: 10px;
+          color: rgba(255, 255, 255, 0.45);
+        font-family: "Courier New", monospace;
+        }
+        
+        .auth-input-section {
+          margin-bottom: 20px;
+        }
+        
+        .input-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+          margin-bottom: 8px;
+        font-size: 9px;
+        font-weight: 800;
+          letter-spacing: 1.2px;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+          color: rgba(255, 255, 255, 0.6);
+        }
+        
+        .input-wrapper {
+        position: relative;
+        }
+        
+        .auth-input {
+          width: 100%;
+          padding: 12px 14px;
+          background: rgba(10, 10, 10, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 10px;
+          color: #fff;
+          font-size: 14px;
+          font-family: "Courier New", monospace;
+          letter-spacing: 1.5px;
+          box-sizing: border-box;
+          outline: none;
+          transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .auth-input:focus {
+          border-color: rgba(255, 255, 255, 0.3);
+          background: rgba(15, 15, 15, 0.8);
+          box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+        }
+        
+        .auth-input::placeholder {
+          color: rgba(255, 255, 255, 0.3);
+          letter-spacing: 4px;
+        }
+        
+        .input-underline {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+          height: 2px;
+          background: linear-gradient(90deg, 
+          transparent,
+            rgba(255, 255, 255, 0.3),
+          transparent
+        );
+          transform: scaleX(0);
+          transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        pointer-events: none;
+      }
+
+        .auth-input:focus + .input-underline {
+          transform: scaleX(1);
+        }
+        
+        .auth-buttons {
+        display: flex;
+          gap: 10px;
+          margin-bottom: 14px;
+        }
+        
+        .auth-btn {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+          gap: 6px;
+          padding: 12px 16px;
+          border-radius: 10px;
+          font-size: 11px;
+        font-weight: 800;
+          letter-spacing: 1.2px;
+        font-family: "Courier New", monospace;
+        cursor: pointer;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+          border: none;
+          outline: none;
+        }
+        
+        .auth-btn-cancel {
+          background: rgba(255, 255, 255, 0.06);
+          color: rgba(255, 255, 255, 0.8);
+          border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        
+        .auth-btn-cancel:hover {
+          background: rgba(255, 255, 255, 0.1);
+          transform: translateY(-2px);
+        }
+        
+        .auth-btn-cancel:active {
+          transform: scale(0.95);
+        }
+        
+        .auth-btn-verify {
+          flex: 1.5;
+        background: linear-gradient(135deg,
+          rgba(255, 255, 255, 0.15),
+          rgba(255, 255, 255, 0.08)
+        );
+          color: #fff;
+          border: 1px solid rgba(255, 255, 255, 0.2);
+          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+        }
+        
+        .auth-btn-verify:hover {
+        background: linear-gradient(135deg,
+          rgba(255, 255, 255, 0.22),
+          rgba(255, 255, 255, 0.12)
+        );
+          transform: translateY(-2px);
+          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+        }
+        
+        .auth-btn-verify:active {
+          transform: scale(0.95);
+        }
+        
+        .auth-btn:disabled {
+          opacity: 0.5;
+        cursor: not-allowed;
+          transform: none !important;
+        }
+        
+        .auth-status {
+          min-height: 20px;
+        text-align: center;
+          font-size: 11px;
+        font-weight: 600;
+          padding: 6px 10px;
+          border-radius: 6px;
+          background: rgba(255, 255, 255, 0.03);
+          border: 1px solid transparent;
+          transition: all 0.3s ease;
+        }
+        
+        .auth-status:empty {
+          opacity: 0;
+        }
+        
+        .auth-status.warning {
+          color: #f59e0b;
+          border-color: rgba(245, 158, 11, 0.2);
+          background: rgba(245, 158, 11, 0.05);
+        }
+        
+        .auth-status.loading {
+          color: rgba(255, 255, 255, 0.8);
+        border-color: rgba(255, 255, 255, 0.15);
+        background: rgba(255, 255, 255, 0.05);
+      }
+
+        .auth-status.success {
+          color: #00ba7c;
+          border-color: rgba(0, 186, 124, 0.2);
+          background: rgba(0, 186, 124, 0.05);
+        }
+        
+        .auth-status.error {
+          color: #f91880;
+          border-color: rgba(249, 24, 128, 0.2);
+          background: rgba(249, 24, 128, 0.05);
+        }
+        
+        .auth-warning-box {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+          margin-top: 10px;
+        font-size: 10px;
+        color: rgba(255, 255, 255, 0.6);
+        font-family: "Courier New", monospace;
+        }
+
+        .auth-warning-box svg {
+        width: 14px;
+        height: 14px;
+          animation: warningPulse 2s ease-in-out infinite;
+        }
+
+        @keyframes warningPulse {
+          0%, 100% { opacity: 0.9; transform: scale(1); }
+          50% { opacity: 1; transform: scale(1.05); }
+        }
+        
+        @media (max-width: 480px) {
+          .auth-cassette-box {
+            padding: 20px 18px;
+            max-width: 320px;
+          }
+          
+          .vinyl-lock-icon {
+            width: 56px;
+            height: 56px;
+          }
+          
+          .lock-overlay svg {
+            width: 20px;
+            height: 20px;
+          }
+          
+          .auth-header {
+            margin-bottom: 18px;
+          }
+          
+          .auth-title {
+          font-size: 12px;
+            letter-spacing: 2px;
+          }
+          
+          .auth-subtitle {
+          font-size: 11px;
+        }
+
+          .auth-hint {
+          font-size: 9px;
+          }
+          
+          .auth-input {
+          padding: 10px 12px;
+            font-size: 13px;
+          }
+          
+          .auth-btn {
+            padding: 10px 14px;
+            font-size: 10px;
+            gap: 5px;
+          }
+          
+          .auth-btn svg {
+        width: 14px;
+        height: 14px;
+          }
+          
+          .auth-status {
+        font-size: 10px;
+            padding: 5px 8px;
+          }
+        }
+      </style>
+    `;
+
+    document.body.appendChild(modal);
+
+    // 自动聚焦输入框
+    setTimeout(() => {
+      const input = document.getElementById("social-key-input");
+      if (input) input.focus();
+    }, 600);
+
+    // 绑定验证按钮事件
+    setupSocialVerificationButton();
+  }
+
+  /**
+   * 设置社交功能验证按钮
+   */
+  function setupSocialVerificationButton() {
+    const btn = document.getElementById("verify-social-key");
+    if (!btn) return;
+
+    btn.onclick = async () => {
+      const input = document.getElementById("social-key-input");
+      const status = document.getElementById("social-verify-status");
+      const key = input.value.trim();
+
+      // 验证输入
+      if (!key) {
+        showStatus(status, "请输入通行密钥", "warning");
+        input.focus();
+        return;
+      }
+
+      // 显示加载状态
+      btn.innerHTML = `
+        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5" style="animation: spin 1s linear infinite;">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M12 2 A10 10 0 0 1 22 12"/>
+        </svg>
+        <span>VERIFYING...</span>
+        <style>
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+        </style>
+      `;
+      btn.disabled = true;
+      showStatus(status, "正在验证密钥，请稍候...", "loading");
+
+      try {
+        // 调用验证API（使用 featureType 参数区分功能类型）
+        const deviceId = getDeviceId();
+        const response = await fetch(CONFIG.WORKER_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key,
+            deviceId,
+            featureType: "social", // 标识为社交功能
+          }),
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        if (result.valid) {
+          // 验证成功，生成token
+          const token = safeBase64Encode(
+            JSON.stringify({
+              exp: Date.now() + CONFIG.TOKEN_EXPIRY,
+              user: result.user || "用户",
+              timestamp: Date.now(),
+              key: key,
+            })
+          );
+
+          localStorage.setItem(CONFIG.SOCIAL_STORAGE_KEY, token);
+
+          showStatus(
+            status,
+            `验证成功！欢迎 ${result.user || "用户"}`,
+            "success"
+          );
 
           // 延迟关闭弹窗并刷新
           setTimeout(() => {
@@ -31509,14 +32968,965 @@ ${index + 1}. ${comment.user.name} (${comment.user.handle}): ${
             // 刷新当前页面
             window.location.reload();
           }, 1200);
-        } 
+        } else {
+          // ✅ 显示服务器返回的详细错误信息
+          const errorMsg = result.error || "密钥无效或已过期，请重试";
+          console.error("❌ 社交功能验证失败:", errorMsg, result);
+          showStatus(status, errorMsg, "error");
+          resetButton(btn);
+          input.focus();
+          input.select();
+        }
+      } catch (error) {
+        console.error("社交功能验证失败:", error);
+
+        let errorMsg = "验证失败，请重试";
+        if (error.name === "AbortError") {
+          errorMsg = "请求超时，请检查网络连接";
+        } else if (!navigator.onLine) {
+          errorMsg = "网络未连接，请检查后重试";
+        }
+
+        showStatus(status, errorMsg, "error");
+        resetButton(btn);
+      }
     };
   }
 
- 
+  /**
+   * 显示地图功能密钥输入弹窗
+   */
+  function requestMapAccess() {
+    // 避免重复弹窗
+    if (document.getElementById("map-auth-modal")) return;
 
+    const modal = document.createElement("div");
+    modal.id = "map-auth-modal";
+    modal.className = "live-auth-container"; // 复用直播功能的样式
+    modal.innerHTML = `
+      <div class="auth-overlay"></div>
+      <div class="auth-cassette-box">
+        <!-- 磁带纹理 -->
+        <div class="cassette-texture"></div>
 
+        <!-- 头部：唱片图标 + 标题 -->
+        <div class="auth-header">
+          <div class="vinyl-lock-icon">
+            <svg class="vinyl-disc-svg" viewBox="0 0 100 100">
+              <circle cx="50" cy="50" r="45" fill="url(#vinylGradient)"/>
+              <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/>
+              <circle cx="50" cy="50" r="30" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/>
+              <circle cx="50" cy="50" r="20" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/>
+              <circle cx="50" cy="50" r="8" fill="#0a0a0a"/>
+              <defs>
+                <radialGradient id="vinylGradient">
+                  <stop offset="0%" style="stop-color:#2a2a2a"/>
+                  <stop offset="50%" style="stop-color:#1a1a1a"/>
+                  <stop offset="100%" style="stop-color:#0a0a0a"/>
+                </radialGradient>
+              </defs>
+            </svg>
+            <div class="lock-overlay">
+              <svg viewBox="0 0 24 24" width="24" height="24" stroke="#fff" fill="none" stroke-width="2">
+                <rect x="5" y="11" width="14" height="10" rx="2"/>
+                <path d="M12 15v2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+          </div>
 
+          <div class="auth-title-section">
+            <h3 class="auth-title">ACCESS REQUIRED</h3>
+            <p class="auth-subtitle">请输入管理员提供的地图功能密钥</p>
+            <p class="auth-hint">验证成功后7天内有效</p>
+          </div>
+        </div>
+
+        <!-- 刷新提示 -->
+        <div class="auth-warning-box">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+          </svg>
+          <span>验证成功后将自动刷新页面，请确保已保存数据</span>
+        </div>
+
+        <!-- 输入区域 -->
+        <div class="auth-input-section">
+          <div class="input-label">
+            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2">
+              <rect x="5" y="11" width="14" height="10" rx="2"/>
+              <path d="M12 15v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+            <span>PASS KEY</span>
+          </div>
+          <div class="input-wrapper">
+            <input
+              id="map-key-input"
+              type="password"
+              placeholder="••••••••••••"
+              class="auth-input"
+              onkeypress="if(event.key==='Enter')document.getElementById('verify-map-key').click()"
+            />
+            <div class="input-underline"></div>
+          </div>
+        </div>
+
+        <!-- 按钮组 -->
+        <div class="auth-buttons">
+          <button class="auth-btn auth-btn-cancel" onclick="document.getElementById('map-auth-modal').remove()">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5">
+              <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+            <span>CANCEL</span>
+          </button>
+          <button id="verify-map-key" class="auth-btn auth-btn-verify">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12"/>
+          </svg>
+            <span>VERIFY</span>
+          </button>
+        </div>
+
+        <!-- 状态提示 -->
+        <div id="map-verify-status" class="auth-status"></div>
+      </div>
+
+      <style>
+        .live-auth-container {
+        position: fixed;
+        inset: 0;
+          z-index: 99999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+          opacity: 0;
+          animation: authFadeIn 0.4s ease forwards;
+        }
+
+        @keyframes authFadeIn {
+          to { opacity: 1; }
+        }
+
+        .auth-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.85);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+        }
+
+        .auth-cassette-box {
+        position: relative;
+          width: 90%;
+          max-width: 340px;
+        background: linear-gradient(
+          135deg,
+            rgba(25, 25, 25, 0.98) 0%,
+            rgba(20, 20, 20, 0.98) 50%,
+            rgba(15, 15, 15, 0.98) 100%
+        );
+        backdrop-filter: blur(40px) saturate(150%);
+          -webkit-backdrop-filter: blur(40px) saturate(150%);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+          border-radius: 20px;
+          box-shadow:
+            0 20px 60px rgba(0, 0, 0, 0.6),
+            0 0 1px rgba(255, 255, 255, 0.2),
+            inset 0 1px 1px rgba(255, 255, 255, 0.1);
+          overflow: hidden;
+          padding: 24px 20px;
+          transform: translateY(40px) scale(0.9);
+          opacity: 0;
+          animation: authSlideUp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s forwards;
+          z-index: 1;
+        }
+
+        @keyframes authSlideUp {
+          to {
+          transform: translateY(0) scale(1);
+            opacity: 1;
+        }
+      }
+
+        .cassette-texture {
+        position: absolute;
+        inset: 0;
+        background: repeating-linear-gradient(
+          90deg,
+          transparent,
+            transparent 2px,
+            rgba(255, 255, 255, 0.01) 2px,
+            rgba(255, 255, 255, 0.01) 4px
+        );
+        pointer-events: none;
+      }
+
+        .auth-header {
+        display: flex;
+          flex-direction: column;
+        align-items: center;
+          margin-bottom: 22px;
+        position: relative;
+      }
+
+        .vinyl-lock-icon {
+          width: 64px;
+          height: 64px;
+        position: relative;
+          margin-bottom: 12px;
+          animation: vinylSpin 8s linear infinite;
+        }
+
+        @keyframes vinylSpin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+
+        .vinyl-disc-svg {
+        width: 100%;
+        height: 100%;
+          filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.6));
+        }
+
+        .lock-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+          animation: lockPulse 2s ease-in-out infinite;
+        }
+
+        @keyframes lockPulse {
+          0%, 100% { opacity: 0.9; transform: scale(1); }
+          50% { opacity: 1; transform: scale(1.05); }
+        }
+
+        .auth-title-section {
+        text-align: center;
+        }
+
+        .auth-title {
+          margin: 0 0 6px 0;
+        font-size: 13px;
+        font-weight: 800;
+          letter-spacing: 2.5px;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+        color: rgba(255, 255, 255, 0.95);
+          text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+      }
+
+        .auth-subtitle {
+          margin: 0 0 3px 0;
+        font-size: 12px;
+          color: rgba(255, 255, 255, 0.7);
+          line-height: 1.4;
+        }
+
+        .auth-hint {
+          margin: 0;
+        font-size: 10px;
+          color: rgba(255, 255, 255, 0.45);
+        font-family: "Courier New", monospace;
+        }
+
+        .auth-input-section {
+          margin-bottom: 20px;
+        }
+
+        .input-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 8px;
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+          color: rgba(255, 255, 255, 0.6);
+        }
+
+        .input-wrapper {
+        position: relative;
+      }
+
+        .auth-input {
+          width: 100%;
+          padding: 12px 14px;
+          background: rgba(10, 10, 10, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 10px;
+          color: #fff;
+          font-size: 14px;
+          font-family: "Courier New", monospace;
+          letter-spacing: 1.5px;
+          box-sizing: border-box;
+          outline: none;
+          transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .auth-input:focus {
+          border-color: rgba(255, 255, 255, 0.3);
+          background: rgba(15, 15, 15, 0.8);
+          box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+        }
+
+        .auth-input::placeholder {
+          color: rgba(255, 255, 255, 0.3);
+          letter-spacing: 4px;
+        }
+
+        .input-underline {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+          height: 2px;
+          background: linear-gradient(90deg,
+          transparent,
+            rgba(255, 255, 255, 0.3),
+          transparent
+        );
+          transform: scaleX(0);
+          transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        pointer-events: none;
+      }
+
+        .auth-input:focus + .input-underline {
+          transform: scaleX(1);
+        }
+
+        .auth-buttons {
+        display: flex;
+          gap: 10px;
+          margin-bottom: 14px;
+        }
+
+        .auth-btn {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+          gap: 6px;
+          padding: 12px 16px;
+          border-radius: 10px;
+        font-size: 11px;
+        font-weight: 800;
+          letter-spacing: 1.2px;
+        font-family: "Courier New", monospace;
+        cursor: pointer;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+          border: none;
+          outline: none;
+        }
+
+        .auth-btn-cancel {
+          background: rgba(255, 255, 255, 0.06);
+          color: rgba(255, 255, 255, 0.8);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+
+        .auth-btn-cancel:hover {
+          background: rgba(255, 255, 255, 0.1);
+          transform: translateY(-2px);
+        }
+
+        .auth-btn-cancel:active {
+          transform: scale(0.95);
+        }
+
+        .auth-btn-verify {
+          flex: 1.5;
+          background: linear-gradient(135deg,
+          rgba(255, 255, 255, 0.15),
+          rgba(255, 255, 255, 0.08)
+        );
+          color: #fff;
+          border: 1px solid rgba(255, 255, 255, 0.2);
+          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+        }
+
+        .auth-btn-verify:hover {
+          background: linear-gradient(135deg,
+          rgba(255, 255, 255, 0.22),
+          rgba(255, 255, 255, 0.12)
+        );
+          transform: translateY(-2px);
+          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+        }
+
+        .auth-btn-verify:active {
+          transform: scale(0.95);
+        }
+
+        .auth-btn:disabled {
+          opacity: 0.5;
+        cursor: not-allowed;
+          transform: none !important;
+        }
+
+        .auth-status {
+          min-height: 20px;
+        text-align: center;
+        font-size: 11px;
+          font-weight: 600;
+          padding: 6px 10px;
+          border-radius: 6px;
+          background: rgba(255, 255, 255, 0.03);
+          border: 1px solid transparent;
+          transition: all 0.3s ease;
+        }
+
+        .auth-status:empty {
+          opacity: 0;
+        }
+
+        .auth-status.warning {
+          color: #f59e0b;
+          border-color: rgba(245, 158, 11, 0.2);
+          background: rgba(245, 158, 11, 0.05);
+        }
+
+        .auth-status.loading {
+        color: rgba(255, 255, 255, 0.8);
+        border-color: rgba(255, 255, 255, 0.15);
+          background: rgba(255, 255, 255, 0.05);
+        }
+
+        .auth-status.success {
+          color: #00ba7c;
+          border-color: rgba(0, 186, 124, 0.2);
+          background: rgba(0, 186, 124, 0.05);
+        }
+
+        .auth-status.error {
+          color: #f91880;
+          border-color: rgba(249, 24, 128, 0.2);
+          background: rgba(249, 24, 128, 0.05);
+        }
+
+        .auth-warning-box {
+        display: flex;
+        align-items: center;
+          gap: 6px;
+          margin-top: 10px;
+        font-size: 10px;
+          color: rgba(255, 255, 255, 0.6);
+        font-family: "Courier New", monospace;
+        }
+
+        .auth-warning-box svg {
+          width: 14px;
+          height: 14px;
+          animation: warningPulse 2s ease-in-out infinite;
+        }
+
+        @keyframes warningPulse {
+          0%, 100% { opacity: 0.9; transform: scale(1); }
+          50% { opacity: 1; transform: scale(1.05); }
+        }
+
+        @media (max-width: 480px) {
+          .auth-cassette-box {
+            padding: 20px 18px;
+            max-width: 320px;
+          }
+
+          .vinyl-lock-icon {
+            width: 56px;
+            height: 56px;
+          }
+
+          .lock-overlay svg {
+            width: 20px;
+            height: 20px;
+          }
+
+          .auth-header {
+            margin-bottom: 18px;
+          }
+
+          .auth-title {
+          font-size: 12px;
+            letter-spacing: 2px;
+          }
+
+          .auth-subtitle {
+          font-size: 11px;
+        }
+
+          .auth-hint {
+          font-size: 9px;
+          }
+
+          .auth-input {
+          padding: 10px 12px;
+            font-size: 13px;
+          }
+
+          .auth-btn {
+            padding: 10px 14px;
+            font-size: 10px;
+            gap: 5px;
+          }
+
+          .auth-btn svg {
+        width: 14px;
+        height: 14px;
+          }
+
+          .auth-status {
+        font-size: 10px;
+            padding: 5px 8px;
+          }
+        }
+      </style>
+    `;
+
+    document.body.appendChild(modal);
+
+    // 自动聚焦输入框
+    setTimeout(() => {
+      const input = document.getElementById("map-key-input");
+      if (input) input.focus();
+    }, 600);
+
+    // 绑定验证按钮事件
+    setupMapVerificationButton();
+  }
+
+  /**
+   * 设置地图功能验证按钮
+   */
+  function setupMapVerificationButton() {
+    const btn = document.getElementById("verify-map-key");
+    if (!btn) return;
+
+    btn.onclick = async () => {
+      const input = document.getElementById("map-key-input");
+      const status = document.getElementById("map-verify-status");
+      const key = input.value.trim();
+
+      // 验证输入
+      if (!key) {
+        showStatus(status, "请输入通行密钥", "warning");
+        input.focus();
+        return;
+      }
+
+      // 显示加载状态
+      btn.innerHTML = `
+        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5" style="animation: spin 1s linear infinite;">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M12 2 A10 10 0 0 1 22 12"/>
+        </svg>
+        <span>VERIFYING...</span>
+        <style>
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+        </style>
+      `;
+      btn.disabled = true;
+      showStatus(status, "正在验证密钥，请稍候...", "loading");
+
+      try {
+        // 调用验证API（使用 featureType 参数区分功能类型）
+        const deviceId = getDeviceId();
+        const response = await fetch(CONFIG.WORKER_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key,
+            deviceId,
+            featureType: "map", // 标识为地图功能
+          }),
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        if (result.valid) {
+          // 验证成功，生成token
+          const token = safeBase64Encode(
+            JSON.stringify({
+              exp: Date.now() + CONFIG.TOKEN_EXPIRY,
+              user: result.user || "用户",
+              timestamp: Date.now(),
+              key: key,
+            })
+          );
+
+          localStorage.setItem(CONFIG.MAP_STORAGE_KEY, token);
+
+          showStatus(
+            status,
+            `验证成功！欢迎 ${result.user || "用户"}`,
+            "success"
+          );
+
+          // 延迟关闭弹窗并刷新
+          setTimeout(() => {
+            document.getElementById("map-auth-modal")?.remove();
+
+            console.log("✅ 地图功能已解锁");
+
+            // 刷新当前页面
+            window.location.reload();
+          }, 1200);
+        } else {
+          // ✅ 显示服务器返回的详细错误信息
+          const errorMsg = result.error || "密钥无效或已过期，请重试";
+          console.error("❌ 地图功能验证失败:", errorMsg, result);
+          showStatus(status, errorMsg, "error");
+          resetButton(btn);
+          input.focus();
+          input.select();
+        }
+      } catch (error) {
+        console.error("地图功能验证失败:", error);
+
+        let errorMsg = "验证失败，请重试";
+        if (error.name === "AbortError") {
+          errorMsg = "请求超时，请检查网络连接";
+        } else if (!navigator.onLine) {
+          errorMsg = "网络未连接，请检查后重试";
+        }
+
+        showStatus(status, errorMsg, "error");
+        resetButton(btn);
+      }
+    };
+  }
+
+  /**
+   * 包装需要权限的函数
+   */
+  function protectFunction(funcName) {
+    const original = window[funcName];
+    if (typeof original !== "function") return;
+
+    window[funcName] = function (...args) {
+      if (!checkLiveAccess()) {
+        console.log(`🔒 ${funcName} 需要权限验证`);
+        requestLiveAccess();
+        return;
+      }
+      return original.apply(this, args);
+    };
+  }
+
+  // ========== 初始化保护 ==========
+
+  // 保护所有直播相关函数
+  const protectedFunctions = [
+    "initLivePage",
+    "joinLiveStream",
+    "startLiveStream",
+    "openLiveRoomPage",
+    "renderLiveStreams",
+    "switchLiveTab",
+    "handleLiveCharacterClick",
+    "openLiveSettings",
+    "refreshLiveStreams",
+  ];
+
+  // 延迟包装，确保函数已定义
+  setTimeout(() => {
+    protectedFunctions.forEach(protectFunction);
+    console.log("🔐 已保护", protectedFunctions.length, "个直播功能");
+  }, 100);
+
+  // 监听DOM加载完成
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initNavigationProtection);
+  } else {
+    initNavigationProtection();
+  }
+
+  /**
+   * 初始化导航栏保护
+   */
+  function initNavigationProtection() {
+    // 延迟执行，确保导航栏已渲染
+    setTimeout(() => {
+      // 查找所有可能的直播按钮（包括顶部和底部导航）
+      const liveButtons = [
+        ...document.querySelectorAll(".x-live-btn"), // 顶部直播按钮
+        ...document.querySelectorAll(".x-nav-item"), // 底部导航项
+      ];
+
+      liveButtons.forEach((item) => {
+        const onclick = item.getAttribute("onclick");
+
+        // 找到直播相关的导航项
+        if (onclick && (onclick.includes("live") || onclick.includes("Live"))) {
+          const originalHandler = item.onclick;
+
+          item.onclick = function (e) {
+            if (!checkLiveAccess()) {
+              e.preventDefault();
+              e.stopPropagation();
+              console.log("🔒 直播功能需要权限验证");
+              requestLiveAccess();
+              return false;
+            }
+
+            // 执行原始处理函数
+            if (originalHandler) {
+              return originalHandler.call(this, e);
+            }
+          };
+
+          console.log("🔐 已保护直播按钮:", item.className || "live-button");
+        }
+      });
+    }, 1500);
+  }
+
+  // ========== 调试工具 ==========
+
+  // 在控制台暴露管理函数
+  window.xLiveAuth = {
+    // 检查权限状态
+    checkStatus: () => {
+      const hasAccess = checkLiveAccess();
+      const token = localStorage.getItem(CONFIG.STORAGE_KEY);
+
+      if (!hasAccess) {
+        console.log("❌ 未授权");
+        return { authorized: false };
+      }
+
+      try {
+        const data = JSON.parse(safeBase64Decode(token));
+        const remainingDays = Math.ceil(
+          (data.exp - Date.now()) / (24 * 60 * 60 * 1000)
+        );
+        console.log("✅ 已授权");
+        console.log("用户:", data.user);
+        console.log("剩余有效期:", remainingDays, "天");
+        return {
+          authorized: true,
+          user: data.user,
+          remainingDays,
+        };
+      } catch {
+        return { authorized: false };
+      }
+    },
+
+    // 手动清除授权
+    clearAuth: () => {
+      localStorage.removeItem(CONFIG.STORAGE_KEY);
+      console.log("✅ 已清除授权，下次访问需要重新验证");
+    },
+
+    // 手动触发验证
+    verify: () => {
+      requestLiveAccess();
+    },
+  };
+
+  console.log("🔐 X Live 权限保护模块已加载");
+  console.log("💡 调试命令: xLiveAuth.checkStatus() / xLiveAuth.clearAuth()");
+// 🌟 开发环境跳过所有权限验证（正式环境删除）
+window.skipAllAuth = true;
+
+// 重写权限检查函数，直接返回true
+const originalCheckLiveAccess = window.checkLiveAccess;
+const originalCheckSocialAccess = window.checkSocialAccess;
+const originalCheckMapAccess = window.checkMapAccess;
+
+window.checkLiveAccess = () => {
+  if (window.skipAllAuth) {
+    console.log("📌 开发模式：跳过直播权限验证");
+    return true;
+  }
+  return originalCheckLiveAccess();
+};
+
+window.checkSocialAccess = () => {
+  if (window.skipAllAuth) {
+    console.log("📌 开发模式：跳过社交权限验证");
+    return true;
+  }
+  return originalCheckSocialAccess();
+};
+
+window.checkMapAccess = () => {
+  if (window.skipAllAuth) {
+    console.log("📌 开发模式：跳过地图权限验证");
+    return true;
+  }
+  return originalCheckMapAccess();
+};
+
+// 重写Token服务器验证，直接返回成功（避免调用Worker）
+const originalValidateLiveTokenWithServer = window.validateLiveTokenWithServer;
+const originalValidateSocialTokenWithServer = window.validateSocialTokenWithServer;
+const originalValidateMapTokenWithServer = window.validateMapTokenWithServer;
+
+window.validateLiveTokenWithServer = async () => {
+  if (window.skipAllAuth) {
+    console.log("📌 开发模式：跳过直播Token服务器验证");
+    return true;
+  }
+  return originalValidateLiveTokenWithServer();
+};
+
+window.validateSocialTokenWithServer = async () => {
+  if (window.skipAllAuth) {
+    console.log("📌 开发模式：跳过社交Token服务器验证");
+    return true;
+  }
+  return originalValidateSocialTokenWithServer();
+};
+
+window.validateMapTokenWithServer = async () => {
+  if (window.skipAllAuth) {
+    console.log("📌 开发模式：跳过地图Token服务器验证");
+    return true;
+  }
+  return originalValidateMapTokenWithServer();
+};
+
+  // ============================================
+  // 第二部分: Live 函数占位符（防止导出时报错）
+  // ============================================
+  // 这些占位符函数会在验证成功后被 x-live-secret.js 的真实函数覆盖
+  // 如果未验证时调用，会触发验证弹窗
+
+  /**
+   * 创建受保护的占位符函数
+   */
+  function createProtectedPlaceholder(funcName) {
+    return function (...args) {
+      if (!checkLiveAccess()) {
+        console.log(`🔒 ${funcName} 需要权限验证`);
+        requestLiveAccess();
+        return;
+      }
+
+      // 已验证但代码未加载，尝试按需加载
+      if (!window._xLiveCodeLoaded) {
+        console.log(`🔄 ${funcName} 需要 live 代码，正在按需加载...`);
+
+        // 异步加载代码
+        loadLiveCodeOnDemand()
+          .then(() => {
+            // 加载成功后重新调用函数（此时已被 x-live-secret.js 覆盖）
+            if (typeof window[funcName] === "function") {
+              window[funcName](...args);
+            }
+          })
+          .catch((error) => {
+            console.error(`❌ 按需加载失败:`, error);
+            // 清除可能已损坏的 token
+            localStorage.removeItem(CONFIG.STORAGE_KEY);
+            requestLiveAccess(); // 重新验证
+          });
+        return;
+      }
+
+      console.warn(`⚠️ ${funcName} 未加载，请刷新页面`);
+    };
+  }
+
+  /**
+   * 按需加载 live 代码
+   */
+  async function loadLiveCodeOnDemand() {
+    if (window._xLiveCodeLoaded) return;
+
+    // 🔍 先实时验证 token 是否仍然有效（防止被拉黑）
+    const isValid = await validateLiveTokenWithServer();
+    if (!isValid) {
+      throw new Error("Token 已失效");
+    }
+
+    const token = localStorage.getItem(CONFIG.STORAGE_KEY);
+    if (!token) throw new Error("No token");
+
+    const data = JSON.parse(safeBase64Decode(token));
+    const deviceId = getDeviceId();
+
+    const response = await fetch(CONFIG.WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: data.key, deviceId }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const result = await response.json();
+
+    if (!result.valid) {
+      // 检查是否被拉黑
+      if (result.blacklisted) {
+        localStorage.removeItem(CONFIG.STORAGE_KEY);
+        throw new Error("访问权限已被撤销");
+      }
+      throw new Error(result.error || "验证失败");
+    }
+
+    if (result.code) {
+      eval(result.code);
+      window._xLiveCodeLoaded = true;
+
+      // ✨ 重新导出所有被覆盖的局部变量到 window
+      // eval执行后，局部变量已被真实函数覆盖，需要更新 window 引用
+      window.switchLiveTab = switchLiveTab;
+      window.joinLiveStream = joinLiveStream;
+      window.initLivePage = initLivePage;
+      window.renderLiveStreams = renderLiveStreams;
+      window.openLiveCategoryModal = openLiveCategoryModal;
+      window.closeLiveCategoryModal = closeLiveCategoryModal;
+      window.addNewLiveCategory = addNewLiveCategory;
+      window.deleteLiveCategory = deleteLiveCategory;
+      window.toggleLiveCategory = toggleLiveCategory;
+      window.updateLiveCategoryName = updateLiveCategoryName;
+      window.updateLiveCategoryDescription = updateLiveCategoryDescription;
+      window.saveLiveCustomCategories = saveLiveCustomCategories;
+      window.syncLivePageAvatar = syncLivePageAvatar;
+      window.toggleLiveActionButtons = toggleLiveActionButtons;
+      window.refreshLiveStreams = refreshLiveStreams;
+      window.startLiveStream = startLiveStream;
+      window.syncLiveCharacterAvatars = syncLiveCharacterAvatars;
+      window.handleLiveCharacterClick = handleLiveCharacterClick;
+      window.loadSavedLiveData = loadSavedLiveData;
+      window.loadLiveCharacterStatus = loadLiveCharacterStatus;
+      window.saveLiveCharacterStatus = saveLiveCharacterStatus;
+      window.handleLiveMainBtnMouseOver = handleLiveMainBtnMouseOver;
+      window.handleLiveMainBtnMouseOut = handleLiveMainBtnMouseOut;
+      window.handleLiveMainBtnTouchStart = handleLiveMainBtnTouchStart;
+      window.handleLiveMainBtnTouchEnd = handleLiveMainBtnTouchEnd;
+      window.handleLiveSubBtnMouseOver = handleLiveSubBtnMouseOver;
+      window.handleLiveSubBtnMouseOut = handleLiveSubBtnMouseOut;
+      window.handleLiveSubBtnTouchStart = handleLiveSubBtnTouchStart;
+      window.handleLiveSubBtnTouchEnd = handleLiveSubBtnTouchEnd;
+      window.closeLiveRoom = closeLiveRoom;
+      window.toggleLiveInfo = toggleLiveInfo;
+      window.sendDanmaku = sendDanmaku;
+      window.sendLike = sendLike;
+      window.showLiveRoomMenu = showLiveRoomMenu;
+
+      console.log("✅ live 代码按需加载成功，已更新所有函数引用");
+    } else {
+      throw new Error("响应中没有代码");
+    }
+  }
 
   // 定义所有 live 相关函数的占位符（作为局部变量，由 x-exports.js 导出）
   // x-live-secret.js 加载后会覆盖这些局部变量
@@ -31593,7 +34003,133 @@ ${index + 1}. ${comment.user.name} (${comment.user.handle}): ${
 
   console.log("🔧 已创建", 33, "个 live 函数占位符（局部变量模式）");
 
+  // ============================================
+  // 第三部分: 导出社交功能验证API（供其他模块使用）
+  // ============================================
+  window.xSocialAuth = {
+    // 检查权限状态
+    checkStatus: () => {
+      const hasAccess = checkSocialAccess();
+      const token = localStorage.getItem(CONFIG.SOCIAL_STORAGE_KEY);
 
+      if (!hasAccess) {
+        console.log("❌ 社交功能未授权");
+        return { authorized: false };
+      }
+
+      try {
+        const data = JSON.parse(safeBase64Decode(token));
+        const remainingDays = Math.ceil(
+          (data.exp - Date.now()) / (24 * 60 * 60 * 1000)
+        );
+        console.log("✅ 社交功能已授权");
+        console.log("用户:", data.user);
+        console.log("剩余有效期:", remainingDays, "天");
+        return {
+          authorized: true,
+          user: data.user,
+          remainingDays,
+        };
+      } catch {
+        return { authorized: false };
+      }
+    },
+
+    // 手动清除授权
+    clearAuth: () => {
+      localStorage.removeItem(CONFIG.SOCIAL_STORAGE_KEY);
+      console.log("✅ 已清除社交功能授权，下次访问需要重新验证");
+    },
+
+    // 手动触发验证
+    verify: () => {
+      requestSocialAccess();
+    },
+
+    // 检查是否有权限（供其他模块调用）
+    hasAccess: () => {
+      return checkSocialAccess();
+    },
+
+    // 请求权限（供其他模块调用）
+    requestAccess: () => {
+      requestSocialAccess();
+    },
+
+    // 🔍 实时验证 Token（异步，返回 Promise）
+    validateToken: () => {
+      return validateSocialTokenWithServer();
+    },
+  };
+
+  // ============================================
+  // 第四部分: 导出地图功能验证API（供其他模块使用）
+  // ============================================
+  window.xMapAuth = {
+    // 检查权限状态
+    checkStatus: () => {
+      const hasAccess = checkMapAccess();
+      const token = localStorage.getItem(CONFIG.MAP_STORAGE_KEY);
+
+      if (!hasAccess) {
+        console.log("❌ 地图功能未授权");
+        return { authorized: false };
+      }
+
+      try {
+        const data = JSON.parse(safeBase64Decode(token));
+        const remainingDays = Math.ceil(
+          (data.exp - Date.now()) / (24 * 60 * 60 * 1000)
+        );
+        console.log("✅ 地图功能已授权");
+        console.log("用户:", data.user);
+        console.log("剩余有效期:", remainingDays, "天");
+        return {
+          authorized: true,
+          user: data.user,
+          remainingDays,
+        };
+      } catch {
+        return { authorized: false };
+      }
+    },
+
+    // 手动清除授权
+    clearAuth: () => {
+      localStorage.removeItem(CONFIG.MAP_STORAGE_KEY);
+      console.log("✅ 已清除地图功能授权，下次访问需要重新验证");
+    },
+
+    // 手动触发验证
+    verify: () => {
+      requestMapAccess();
+    },
+
+    // 检查是否有权限（供其他模块调用）
+    hasAccess: () => {
+      return checkMapAccess();
+    },
+
+    // 请求权限（供其他模块调用）
+    requestAccess: () => {
+      requestMapAccess();
+    },
+
+    // 🔍 实时验证 Token（异步，返回 Promise）
+    validateToken: () => {
+      return validateMapTokenWithServer();
+    },
+  };
+
+  console.log("🔐 X Live 权限保护模块已加载");
+  console.log("🔐 X Social 权限保护模块已加载");
+  console.log("🔐 X Map 权限保护模块已加载");
+  console.log(
+    "💡 调试命令: xSocialAuth.checkStatus() / xSocialAuth.clearAuth()"
+  );
+  console.log(
+    "💡 调试命令: xMapAuth.checkStatus() / xMapAuth.clearAuth()"
+  );
 
   // 第一部分：CSS样式注入
   // ==========================================
@@ -58879,7 +61415,20 @@ ${
     },
   };
 
- 
+  // ==========================================
+  // 第五部分：对外接口
+  // ==========================================
+
+  // 打开地图约会页面
+  function openMapPage() {
+    // 🔒 地图约会功能权限验证：需要社交密钥
+    if (typeof window.xSocialAuth !== 'undefined' && !window.xSocialAuth.hasAccess()) {
+      console.log(`🔒 访问地图约会功能需要社交功能权限`);
+      window.xSocialAuth.requestAccess();
+      return; // 阻止打开地图
+    }
+    // 注入样式
+    injectMapStyles();
 
     // 获取容器，如果有通用容器就用，否则创建一个
     let container = document.getElementById('x-map-container');
